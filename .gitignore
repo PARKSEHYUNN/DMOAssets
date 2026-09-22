@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+*.blob
+
+# Extracted game assets and caches (copyrighted, never commit)
+extracted/
+output/
+cache/
+*.glb
+*.fbx
+
+# Local settings
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# docs
+CLAUDE.md
+ROADMAP.md

@@ -1,16 +1,15 @@
 {
   "name": "dmoassets",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "author": "PARKSEHYUNN <parksehyun2024@gmail.com>",
+  "private": true,
+  "description": "Digimon Masters Online asset viewer and extractor",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "devDependencies": {
-    "electron": "^44.4.3"
+  "scripts": {
+    "test": "node --env-file-if-exists=.env --test \"test/**/*.test.js\""
   }
 }

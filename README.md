@@ -4,7 +4,7 @@
 
 Asset viewer and extractor for the Digimon Masters Online client.
 
-> **Status: in development.** Nothing is usable yet. See [ROADMAP.md](ROADMAP.md) for progress.
+> **Status: in development.** Nothing is usable yet.
 
 ## Features (planned)
 

@@ -23,10 +23,15 @@ GDMO Steam: 리소스 `Pack01` (51,830개), 테이블 `Pack03` (909개).
 - 라이브 설치본은 패치로 바뀐다. 항목 수를 고정값으로 가정하지 않는다.
 
 ### GDMO Steam 차이
-- 팩 이름만 다르다 (위).
-- 테이블 팩 909개 중 541개는 SVN 충돌 사본 (접미사 `.r4363` `.r4146` `.r4050` `.mine`). 실제 테이블은 접미사 없는 368개. 목록에서 숨긴다. KDMO 에는 없다.
+- 팩 이름만 다르다 (위). 형식, 복호, 경로 규칙은 같다.
+- **SVN 충돌 사본**: 접미사 `.r<숫자>` 또는 `.mine` 인 항목은 개발사 SVN 충돌 사본이다. 게임은 쓰지 않으므로 목록에서 숨긴다. KDMO 에는 없다.
+  - 2026-09-23 기준 543개: 테이블 팩 541개 (`.r4363` 254, `.r4146` 160, `.r4050` 94, `.mine` 33) + 리소스 팩 2개 (`data\map\realworld_r\02_datsbase\3\map_data\3.nif.r9076`, `.r9429`).
+  - 접미사 번호는 목록으로 고정하지 말고 `.r\d+` 패턴으로 거른다.
+  - 걸러낸 뒤 테이블 팩은 368개 (`.bin` 367 + `data\bin\table\recompense.txt` 1).
+- **문자열 표 폴더**: KDMO 는 `data\bin\language\korea\` (67개) + `koreaorg\skill_str.bin` (1개). GDMO 는 `language\english\` 와 `language\spanish\`. 같은 표 이름이 폴더만 바꿔 들어 있다.
+  - GDMO 영어판 표 안에도 번역 안 된 한글 문자열이 남아 있다 (`quest_str.bin`, `digimonridingcomment_str.bin` 등).
+- **테이블 목록 차이**: 대부분 같다. GDMO 에만 있는 표가 있다 (`cashshop_steam_main.bin`, `cashshop_steam_category.bin`, `dm_ranking_dungeon-ranktype_str.bin` 등). KDMO 에만 있는 것은 `dm_luckydraw_info-luckydrawinfo.bin`. 같은 이름 표의 레코드 형식 차이는 미확인 (표 파서를 만들 때 확인).
 - 맵 UI 는 `data\interface\map\__map_eng\<이름>` 에서 찾는다.
-- 문자열 표 폴더와 테이블 형식 차이는 미확인.
 
 ## 2. HF 인덱스
 
@@ -89,7 +94,8 @@ offset -   4 : u32     경로 길이 L (1..260)
 offset       : 데이터
 ```
 - 모든 항목에 청크가 있어 이름 목록 파일 없이 **이름을 전부 복원**할 수 있다. KDMO pack01 51,006개와 Pack02 295개 전부 청크 경로의 해시가 인덱스 해시와 일치.
-- 방어 코드: `0 < L <= 260` 이고 경로가 `[A-Za-z0-9_ .\-()\\/']` 문자로만 돼 있을 때 믿는다. 아니면 `_unnamed\<HASH>.bin`.
+- 방어 코드: `0 < L <= 260`, 경로가 인쇄 가능한 ASCII (0x20~0x7E) 이고 Windows 파일 이름에 못 쓰는 문자 (`< > : " | ? *`) 가 없으며, **경로의 해시가 인덱스 해시와 같을 때** 믿는다. 아니면 `_unnamed\<HASH>.bin`.
+  - 실제 경로에 `#` `+` `&` 가 있다 (pack01 에 23개, 예: `...\structure\map #387.dds`, `...\263_stair+_ao.dds`, `...\people&velox.dds`). 문자 목록을 좁게 잡으면 이 항목들을 놓친다.
 - 경로 대소문자는 항목마다 섞여 있다 (`Data\Digimon\...` / `data\digimon\...`). 비교는 소문자로.
 
 ## 5. 항목 복호
@@ -122,6 +128,7 @@ outer[72..]    payload
    - 앞의 `floor(orig / 4)` 개 u32 는 2-1 과 똑같이 푼다.
    - 남는 t = `orig % 4` 바이트는 마지막 u32 처리 후의 상태 `st` 로 푼다: `out[i] = in[i] ^ ((st >>> (8 * (4 - t + i))) & 0xFF)`, i = 0..t-1. 꼬리를 u32 의 **상위 바이트** 자리에 놓고 XOR 하는 셈.
    - 틀리면 파일 마지막 1~3바이트만 조용히 깨진다. Steam 테이블 882개 중 363개가 해당.
+   - 확인 (2026-09-23): 길이가 4의 배수가 아닌 문자열 표 (KDMO korea 37개, GDMO english 36개) 의 파일 끝 문자열이 모두 정상 텍스트로 읽힌다 (예: `디마와 함께!`, `Good luck to you!`).
 6. 결과가 다시 진짜 zlib 헤더로 시작하면 한 번 더 푼다 (inner zlib, 있기도 없기도 함). 풀린 길이가 입력보다 짧으면 오탐이므로 풀기 전 값을 쓴다.
 
 테스트 (KDMO Pack02 `data\bin\table\digimonlistdata.bin`): 저장 184,108 B → outer 187,936 B, 타입 0x10, payLen 187,864 → 최종 187,856 B, 첫 u32 = 876.
@@ -158,7 +165,7 @@ st = (Math.imul((x + st) >>> 0, 52845) + 22719) >>> 0;
 - `fs.openSync(pf, 'r')` 후 항목마다 `fs.readSync(fd, buf, 0, len, position)`.
 - 이름 복원은 51,006번 읽는다. offset 순으로 정렬해서 읽고, GUI 에서는 워커 스레드.
 - **KDMO 게임 (`DigimonMasters.exe`) 실행 중에는 `.pf` 가 잠겨 `EBUSY` 로 열리지 않는다** (2026-09-22 확인). `.hf` 는 열린다. GDMO Steam 은 미확인.
-  - 결정: `EBUSY` 면 "게임을 종료한 뒤 다시 시도하세요" 로 안내하고 끝낸다. 우회 (VSS, 게임 핸들 복제, 메모리 읽기) 는 하지 않는다. 핸들 복제와 메모리 읽기는 안티치트 (XIGNCODE) 제재 위험이 있다.
+  - 결정: `EBUSY` 면 "Close the game and try again." 로 안내하고 끝낸다. 우회 (VSS, 게임 핸들 복제, 메모리 읽기) 는 하지 않는다. 핸들 복제와 메모리 읽기는 안티치트 (XIGNCODE) 제재 위험이 있다.
 
 ### 6-4. Blowfish
 - Node 17+ (OpenSSL 3) 에서 `bf-ecb` 는 legacy provider 로 빠져 `createDecipheriv` 가 안 될 수 있다. **JS 로 직접 구현** (P 18개, S 4x256 표준 상수, 약 100줄).

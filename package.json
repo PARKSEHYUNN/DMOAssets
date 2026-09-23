@@ -6,10 +6,15 @@
   "description": "Digimon Masters Online asset viewer and extractor",
   "license": "MIT",
   "type": "module",
+  "main": "gui/main.js",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
+    "start": "electron .",
     "test": "node --env-file-if-exists=.env --test \"test/**/*.test.js\""
+  },
+  "devDependencies": {
+    "electron": "^44.4.4"
   }
 }

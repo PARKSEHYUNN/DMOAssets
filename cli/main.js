@@ -9,21 +9,31 @@
  * 
  *   node cli/main.js list    <DMO Data 폴더> [-f 패턴]
  *   node cli/main.js extract <DMO Data 폴더> [-f 패턴] [-o 출력 폴더]
+ *   node cli/main.js convert <DMO Data 폴더> <팩 안의 nif 또는 kfm 경로> [-o 출력]
  * 
  * 종료 코드: 0 성공, 1 실패 (일부 항목 실패 포함), 2 게임이 팩을 잠금.
  */
+
+import fs from "node:fs";
+import path from "node:path";
 import { parseArgs } from "node:util";
 import { PackFolder, PackLockedError } from "../core/pack.js";
 import { filterEntries, extractEntries } from "../core/extract.js";
+import { convertPackModel } from "../core/gltf.js";
 
 const USAGE = `Usage:
   dmoassets list    <DMO Data folder> [-f <pattern>]
-  dmoassets extract <DMO Data folder> [-f <pattern>] [-o <output folder>]
-  
+    dmoassets extract <DMO Data folder> [-f <pattern>] [-o <output folder>]
+  dmoassets convert <DMO Data folder> <path in pack> [-o <output file or folder>]
+
 Options:
   -f, --filter <pattern>  Substring (e.g. agumon) or glob (e.g. data/digimon/**/*.nif). Case-insensitive.
-  -o, --output <folder>   Output folder for extract (default: ./extracted)
-  -h, --help              Show this help`;
+  -o, --output <path>     Output folder for extract (default: ./extracted), file or folder for convert
+      --format <format>   Model format for convert: glb (default)
+  -h, --help              Show this help
+
+Convert takes a .nif, or a .kfm that names the model's .nif.`;
+
 
 /**
  * 진행 상황을 한 줄에 덮어써서 보여 주는 함수를 만든다.
@@ -84,6 +94,35 @@ function extract(folder, filter, outDir) {
 }
 
 /**
+ * convert 명령: 팩 안의 모델 하나를 GLB 파일로 만든다.
+ * @param {PackFolder} folder 열린 팩 폴더
+ * @param {string} packPath 팩 안의 nif 또는 kfm 경로
+ * @param {string} [output] 출력 위치 (.glb 로 끝나면 파일, 아니면 폴더). 없으면 현재 폴더
+ * @param {string} format 출력 형식
+ * @returns {number} 종료 코드
+ */
+function convert(folder, packPath, output, format) {
+    // FBX 는 10단계에서 넣는다. 지금은 GLB 만 만든다
+    if (format !== "glb") {
+        console.error(`Unsupported format ${JSON.stringify(format)}. Only "glb" is available.`);
+        return 1;
+    }
+
+    const model = convertPackModel(folder, packPath);
+    // 출력이 .glb 로 끝나면 파일 이름으로, 아니면 폴더로 본다
+    const name = path.basename(model.path).replace(/\.nif$/i, ".glb");
+    const file = output && /\.glb$/i.test(output) ? output : path.join(output ?? ".", name);
+    fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+    fs.writeFileSync(file, model.glb);
+
+    console.error(`Wrote ${file} (${(model.glb.length / 1024 / 1024).toFixed(1)} MB) from ${model.path}`);
+    // 텍스처를 못 찾으면 모델이 민짜로 나온다. 조용히 넘기지 않고 알린다 (FORMAT 10-3 2번)
+    for (const w of model.warnings) console.error(`  ${w}`);
+    return 0;
+}
+
+
+/**
  * 인자를 해석해 명령을 실행한다.
  * @param {string[]} argv 명령줄 인자 (node 와 스크립트 경로 제외)
  * @returns {number} 종료 코드
@@ -94,13 +133,15 @@ export function main(argv) {
         allowPositionals: true,
         options: {
             filter: { type: "string", short: "f" },
-            output: { type: "string", short: "o", default: "extracted" },
+            output: { type: "string", short: "o" },
+            format: { type: "string", default: "glb" },
             help: { type: "boolean", short: "h" },
         },
     });
-    const [command, dir] = positionals;
-    // 명령과 폴더가 없거나 도움말을 요청하면 사용법을 보여 준다
-    if (values.help || !command || !dir || !["list", "extract"].includes(command)) {
+    const [command, dir, target] = positionals;
+    // 명령과 폴더가 없거나 도움말을 요청하면 사용법을 보여 준다.
+    // convert 는 팩 안의 경로까지 있어야 한다
+    if (values.help || !command || !dir || !["list", "extract", "convert"].includes(command) || (command === "convert" && !target)) {
         console.error(USAGE);
         return values.help ? 0 : 1;
     }
@@ -117,7 +158,9 @@ export function main(argv) {
         throw e;
     }
     try {
-        return command === "list" ? list(folder, values.filter) : extract(folder, values.filter, values.output);
+        if (command === "list") return list(folder, values.filter);
+        if (command === "convert") return convert(folder, target, values.output, values.format);
+        return extract(folder, values.filter, values.output ?? "extracted");
     } finally {
         folder.close();
     }

@@ -217,6 +217,59 @@ function readGeometry(r, strings) {
 }
 
 /**
+ * NiTransform 하나를 읽는다 (스킨 블록에서 쓴다).
+ * NiAVObject 와 달리 회전이 먼저 온다: 회전 9f -> 이동 3f -> 배율 1f (FORMAT 9-1).
+ * @param {Reader} r 커서
+ * @returns {{ rotation: number[], translation: number[], scale: number }}
+ */
+function readTransform(r) {
+    const rotation = r.floats(9);
+    const translation = r.floats(3);
+    const scale = r.f32();
+    return { rotation, translation, scale };
+}
+
+/**
+ * NiSkinInstance 를 읽는다. 이 메시를 움직이는 뼈 목록이 들어 있다.
+ * NiObjectNET 을 거치지 않고 바로 시작한다.
+ * @param {Reader} r 커서
+ * @returns {object}
+ */
+function readSkinInstance(r) {
+    const data = r.ref();
+    const skinPartition = r.ref();
+    const skeletonRoot = r.ref();
+    // 뼈 순서가 NiSkinData 의 뼈 순서와 같다
+    const bones = r.refs(r.u32());
+    return { data, skinPartition, skeletonRoot, bones };
+}
+
+/**
+ * NiSkinData 를 읽는다. 뼈마다 바인드 변환과 정점 가중치가 들어 있다.
+ * @param {Reader} r 커서
+ * @returns {object}
+ */
+function readSkinData(r) {
+    // 메시 전체에 걸리는 변환. 뼈 변환과 함께 쓰면 바인드 자세가 나온다 (FORMAT 9-2)
+    const transform = readTransform(r);
+    const numBones = r.u32();
+    const hasWeights = r.bool();
+    const bones = [];
+    for (let i = 0; i < numBones; i ++) {
+        const boneTransform = readTransform(r);
+        r.floats(4); // 뼈가 움직이는 범위의 바운딩 구 (안 쓴다)
+        const weights = [];
+        if (hasWeights) {
+            // 이 뼈가 움직이는 정점 번호와 가중치
+            const count = r.u16();
+            for (let v = 0; v < count; v ++) weights.push({ vertex: r.u16(), weight: r.f32() });
+        }
+        bones.push({ transform: boneTransform, weights });
+    }
+    return { transform, bones };
+}
+
+/**
  * NiGeometryData 공통 부분 (정점, 법선, 색, UV) 을 읽는다.
  * @param {Reader} r 커서
  * @returns {object}
@@ -461,6 +514,8 @@ const READERS = {
     NiTriStrips: readGeometry,
     NiTriShapeData: readTriShapeData,
     NiTriStripsData: readTriStripsData,
+    NiSkinInstance: readSkinInstance,
+    NiSkinData: readSkinData,
     NiMaterialProperty: readMaterial,
     NiTexturingProperty: readTexturing,
     NiAlphaProperty: readAlpha,

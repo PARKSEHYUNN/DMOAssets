@@ -87,6 +87,112 @@ function nodeTransform(node) {
 }
 
 /**
+ * 색 값을 0~1 로 자른다.
+ * 이펙트 재질은 알파나 색을 0아래 또는 1 위로 넣어 두기도 하는데 (애니메이션으로 오르내린다),
+ * glTF 는 0~1 만 받는다.
+ * @param {number[]} values 색 성분
+ * @returns {number[]} 잘라 낸 값
+ */
+function clamp01(values) {
+    return values.map((v) => Math.min(1, Math.max(0, v)));
+}
+
+/**
+ * NiAlphaProperty 의 합성 방식을 알아낸다 (FORMAT 9-2)
+ * flags 비트 0 이 합성 여부, 비트 1~4 가 원본 계수, 비트 5~8 이 도착지 계수다.
+ * 계수 번호 0 ONE, 1 ZERO, 2 SRC_COLOR, 3 INV_SRC_COLOR, 6 SRC_ALPHA, 7 INV_SRC_ALPHA.
+ * @param {object | null} alpha NiAlphaProperty 블록
+ * @returns {"none" | "normal" | "add" | "multiply"} 합성 방식
+ */
+function blendMode(alpha) {
+    if (!alpha || !(alpha.flags & 0x1)) return "none";
+    const src = (alpha.flags >> 1) & 0xf;
+    const dst = (alpha.flags >> 5) & 0xf;
+    // 도착지 계수가 ONE 이면 더하기 합성이다 (빛, 오라). 팩에서 제일 흔하다
+    if (dst === 0) return "add";
+    // ZERO -> INV_SRC_COLOR 는 밝은 곳일수록 어둡게 만드는 합성이다
+    if (src === 1 && dst === 3) return "multiply";
+    return "normal";
+}
+
+/**
+ * glTF 에 없는 합성 방식을 알파로 흉내 낸다.
+ * glTF 는 일반 합성만 있어서, 더하기/곱하기 레이어를 그대로 두면 모델을 통째로 덮어 버린다.
+ * - 더하기: 검은 곳은 더해도 변화가 없다. 밝기를 알파로 옮기면 검은 곳이 비친다
+ * - 곱하기: (ZERO -> INV_SRC_COLOR): 밝은 곳일수록 뒤를 어둡게 만든다. 색을 검게 두고 밝기를 알파로 쓴다
+ * @param {import("./image.js").Image} img 푼 텍스처 (그 자리에서 고친다)
+ * @param {"none" | "normal" | "add" | "multiply"} mode 합성 방식
+ * @returns {import("./image.js").Image} 같은 이미지
+ */
+function fakeBlend(img, mode) {
+    if (mode !== "add" && mode !== "multiply") return img;
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+        // 사람 눈에 맞춘 밝기 (0~1)
+        const lum = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) / 255;
+        if (mode === "add") {
+            d[i + 3] = Math.round(d[i + 3] * lum);
+        } else {
+            d[i + 3] = Math.round(lum * 255);
+            d[i] = 0;
+            d[i + 1] = 0;
+            d[i + 2] = 0;
+        }
+    }
+    return img;
+}
+
+
+/**
+ * nif 변환 (이동, 회전, 배율) 을 glTF 의 4x4 행렬로 만든다 (열 순서).
+ * 스킨의 바인드 행렬처럼 노드가 아니라 값으로 넣어야 하는 곳에 쓴다.
+ * @param {{ rotation: number[], translation: number[], scale: number }} t nif 변환
+ * @returns {number[]} 행렬 16개
+ */
+function toMatrix(t) {
+    const m = t.rotation;
+    const s = t.scale;
+    return [
+        m[0] * s, m[3] * s, m[6] * s, 0,
+        m[1] * s, m[4] * s, m[7] * s, 0,
+        m[2] * s, m[5] * s, m[8] * s, 0,
+        t.translation[0], t.translation[1], t.translation[2], 1,
+    ];
+}
+
+/**
+ * 뼈 마다 흩어져 있는 가중치를 정점별로 모아 glTF 형식으로 만든다.
+ * glTF 는 정점 하나에 뼈 4개까지 쓰므로, 더 많으면 큰 것 4개만 남기고 합이 1이 되게 고친다.
+ * @param {object[]} bones NiSkinData 의 뼈 목록
+ * @param {number} numVertices 정점 수
+ * @returns {{ joints: number[], weights: number[] }} 정점당 4개씩 이어 붙인 배열
+ */
+function skinAttributes(bones, numVertices) {
+    // 정점마다 [뼈 번호, 가중치] 목록을 모은다
+    const perVertex = Array.from({ length: numVertices }, () => []);
+    for (let b = 0; b < bones.length; b ++) {
+        for (const w of bones[b].weights) {
+            if (w.vertex < numVertices && w.weight > 0) perVertex[w.vertex].push([b, w.weight]);
+        }
+    }
+
+    const joints = new Array(numVertices * 4).fill(0);
+    const weights = new Array(numVertices * 4).fill(0);
+    for (let v = 0; v < numVertices; v ++) {
+        // 가중치가 큰 것부터 4개만 쓴다 (잘려 나가는 것은 0.3% 정도이고 값도 작다)
+        const list = perVertex[v].sort((a, b) => b[1] - a[1]).slice(0, 4);
+        const total = list.reduce((sum, x) => sum + x[1], 0);
+        for (let i = 0; i < list.length; i ++) {
+            joints[v * 4 + i] = list[i][0];
+            // 4개만 남기고 나면 합이 1보다 작아진다. 다시 1로 맞춘다 (glTF 규칙)
+            weights[v * 4 + i] = total > 0 ? list[i][1] / total : 0;
+        }
+    }
+
+    return { joints, weights };
+}
+
+/**
  * GLB 를 만드는 동안 쓰는 상태를 들고 있는다.
  */
 class Builder {
@@ -94,6 +200,7 @@ class Builder {
      * @param {import("./nif.js").Nif} nif 파싱한 nif
      * @param {object} [options] 설정
      * @param {(fileName: string) => Buffer | null} [options.resolveTexture] 외부 텍스처 파일을 찾아 주는 함수
+     * @param {boolean} [options.skipEffects] 빛 (더하기) 과 어둡게 합성 레이어를 아예 빼고 만든다
      */
     constructor(nif, options = {}) {
         this.nif = nif;
@@ -109,6 +216,7 @@ class Builder {
             scenes: [{ nodes: [0] }],
             nodes: [],
             meshes: [],
+            skins: [],
             materials: [],
             textures: [],
             images: [],
@@ -123,6 +231,14 @@ class Builder {
         this.materialCache = new Map();
         /** @type {Map<string, number>} 형상 데이터 + 재질 -> glTF 메시 번호 */
         this.meshCache = new Map();
+        /** @type {Set<number>} 뼈로 쓰이는 블록 번호. 빈 노드라도 지우면 안 된다 */
+        this.boneBlocks = new Set();
+        /** @type {Map<number, number>} 블록 번호 -> glTF 노드 번호 (뼈를 찾을 때 쓴다)*/
+        this.nodeIndex = new Map();
+        /** @type {{ skin: object, bones: (number | null)[] }[]} 노드 번호가 다 정해진 뒤에 채울 스킨들 */
+        this.pendingSkins = [];
+        /** @type {number[]} 스킨이 붙은 메시 노드. glTF 는 이런 노드의 변환을 무시하므로 뿌리에 단다 */
+        this.skinnedNodes = [];
     }
 
     /**
@@ -196,12 +312,50 @@ class Builder {
     }
 
     /**
+     * 정점당 뼈 번호 4개를 accessor 로 만든다. 뼈는 많아야 수십 개라 u16이면 넉넉하다.
+     * @param {number[]} values 뼈 번호 (정점당 4개씩)
+     * @returns {number} accessor 번호
+     */
+    addJoints(values) {
+        const buf = Buffer.alloc(values.length * 2);
+        for (let i = 0; i < values.length; i ++) buf.writeUInt16LE(values[i], i * 2);
+        this.json.accessors.push({
+            bufferView: this.addView(buf, ARRAY_BUFFER),
+            componentType: U16,
+            count: values.length / 4,
+            type: "VEC4",
+        });
+        return this.json.accessors.length - 1;
+    }
+
+    /**
+     * 4x4 행렬 목록을 accessor 로 만든다 (역바인드 행렬용).
+     * 정점 속성이 아니므로 bufferView 에 target 을 붙이지 않는다 (glTF 규칙).
+     * @param {number[]} values 행렬 값 (행렬마다 16개)
+     * @returns {number} accessor 번호
+     */
+    addMatrices(values) {
+        const buf = Buffer.alloc(values.length * 4);
+        for (let i = 0; i < values.length; i ++) buf.writeFloatLE(values[i], i * 4);
+        this.json.accessors.push({
+            bufferView: this.addView(buf),
+            componentType: FLOAT,
+            count: values.length / 16,
+            type: "MAT4",
+        });
+        return this.json.accessors.length - 1;
+    }
+
+    /**
      * NiSourceTexture 한 장을 glTF 텍스처로 만든다. 같은 블록은 한 번만 만든다.
      * @param {number} sourceIndex NiSourceTexture 블록 번호
+     * @param {"none" | "normal" | "add" | "multiply"} mode 이 텍스처를 쓰는 재질의 합성 방식
      * @returns {number | null} glTF 텍스처 번호. 못 만들면 null
      */
-    addTexture(sourceIndex) {
-        if (this.textureCache.has(sourceIndex)) return this.textureCache.get(sourceIndex);
+    addTexture(sourceIndex, mode) {
+        // 같은 그림이라도 합성 방식이 다르면 알파를 다르게 굽는다
+        const key = `${sourceIndex}|${mode}`;
+        if (this.textureCache.has(key)) return this.textureCache.get(key);
         const source = this.nif.blocks[sourceIndex];
         let png = null;
         try {
@@ -209,25 +363,25 @@ class Builder {
                 // 내장 텍스처 (FORMAT 9): 픽셀 블록을 그대로 풀어서 PNG 로 만든다
                 const block = this.nif.blocks[source.pixelData];
                 const palette = block.palette != null ? this.nif.blocks[block.palette] : undefined;
-                png = encodePNG(decodePixelData(block, palette));
+                png = encodePNG(fakeBlend(decodePixelData(block, palette), mode));
             } else if (source?.fileName) {
                 // 외부 텍스처: nif 의 이름과 팩 안의 이름이 다를 수 있다 (FORMAT 10-2)
                 const file = this.options.resolveTexture?.(source.fileName) ?? null;
-                if (file) png = encodePNG(decodeImage(file, source.fileName));
+                if (file) png = encodePNG(fakeBlend(decodeImage(file, source.fileName), mode));
                 else this.warnings.push(`Texture not found: ${source.fileName}`);
             }
         } catch (e) {
             this.warnings.push(`Texture failed (${source?.fileName ?? sourceIndex}): ${e.message}`);
         }
         if (!png) {
-            this.textureCache.set(sourceIndex, null);
+            this.textureCache.set(key, null);
             return null;
         }
         const image = this.json.images.length;
         this.json.images.push({ bufferView: this.addView(png), mimeType: "image/png", name: source.fileName ?? undefined });
         const texture = this.json.textures.length;
         this.json.textures.push({ sampler: 0, source: image });
-        this.textureCache.set(sourceIndex, texture);
+        this.textureCache.set(key, texture);
         return texture;
     }
 
@@ -243,22 +397,30 @@ class Builder {
         const material = props.material != null ? this.nif.blocks[props.material] : null;
         const texturing = props.texturing != null ? this.nif.blocks[props.texturing] : null;
         const alpha = props.alpha != null ? this.nif.blocks[props.alpha] : null;
-        const texture = texturing?.base?.source != null ? this.addTexture(texturing.base.source) : null;
+        // 합성 방식에 따라 텍스처의 알파를 다르게 굽는다 (더하기/곱하기는 glTF 에 없다)
+        const mode = blendMode(alpha);
+        const texture = texturing?.base?.source != null ? this.addTexture(texturing.base.source, mode) : null;
 
         // glTF 는 PBR 이다. 금속도 0, 거칠기 1 로 두어야 원래 색이 나온다 (FORMAT 10-3 3번)
         const diffuse = material?.diffuse ?? [1, 1, 1];
         const pbr = {
-            baseColorFactor: [diffuse[0], diffuse[1], diffuse[2], material?.alpha ?? 1],
+            baseColorFactor: clamp01([diffuse[0], diffuse[1], diffuse[2], material?.alpha ?? 1]),
             metallicFactor: 0,
             roughnessFactor: 1,
         };
         if (texture != null) pbr.baseColorTexture = { index: texture };
         const out = { name: material?.name ?? undefined, pbrMetallicRoughness: pbr, doubleSided: true };
-        const emissive = material?.emissive;
-        if (emissive && (emissive[0] || emissive[1] || emissive[2])) out.emissiveFactor = emissive;
+        // 스스로 내는 빛. 어둡게 하는 레이어에서 빼야 한다 (흰 빛이 그대로 남아 모델을 덮는다)
+        const emissive = mode === "multiply" ? null : material?.emissive;
+        if (emissive && (emissive[0] || emissive[1] || emissive[2])) out.emissiveFactor = clamp01(emissive);
+        // 더하기 합성은 빛이라 조명을 받지 않는다. 같은 그림을 발광으로 걸어 어두운 곳에서도 밝게 보이게 한다
+        if (mode === "add" && texture != null) {
+            out.emissiveTexture = { index: texture };
+            out.emissiveFactor = [1, 1, 1];
+        }
 
-        // 알파 속성의 비트 0 이 서면 반투명 합성, 비트 9 가 서면 임계값으로 잘라 낸다
-        if (alpha && alpha.flags & 0x1) out.alphaMode = "BLEND";
+        // 합성이 있으면 반투명, 없고 비트 9 만 서있으면 임계값으로 잘라 낸다
+        if (mode !== "none") out.alphaMode = "BLEND";
         else if (alpha && alpha.flags & 0x200) {
             out.alphaMode = "MASK";
             out.alphaCutoff = alpha.threshold / 255;
@@ -271,31 +433,70 @@ class Builder {
     }
 
     /**
-     * NiTriShape / NiTriStrips 를 glTF 메시로 만든다. 같은 데이터 + 같은 재질이면 다시 쓴다.
+     * NiSkinInstance 를 glTF 스킨으로 만든다.
+     * 뼈 노드 번호는 트리를 다 돌아야 알 수 있으므로 나중에 채운다 (pendingSkins).
+     * @param {number} skinInstanceIndex NiSkinInstance 블록 번호
+     * @param {number} numVertices 이 메시의 정점 수
+     * @returns {{ index: number, joints: number[], weights: number[] } | null} 스킨 번호와 정점 속성. 못 만들면 null
+     */
+    addSkin(skinInstanceIndex, numVertices) {
+        const instance = this.nif.blocks[skinInstanceIndex];
+        const data = instance?.data != null ? this.nif.blocks[instance.data] : null;
+        if (!data || data.bones.length !== instance.bones.length) return null;
+        // 뼈가 트리 밖에 있으면 노드를 만들 수 없다. 스킨을 포기하고 굳은 메시로 둔다
+        if (instance.bones.some((b) => b == null ||  !this.reachable.has(b))) {
+            this.warnings.push(`Skin skipped: ${instance.bones.length} bones are not in the node tree`);
+            return null;
+        }
+
+        const { joints, weights } = skinAttributes(data.bones, numVertices);
+        // 역바인드 행렬은 뼈마다의 스킨 변환 그대로다.
+        // nif 에서 "뼈 월드 변환 * 뼈 스킨 변환" 이 바인드 자세라서 (FORMAT 9-2), glTF 가 바라는 값과 같다
+        const matrices = data.bones.flatMap((b) => toMatrix(b.transform));
+        const skin = { inverseBindMatrices: this.addMatrices(matrices), joints: [] };
+        const index = this.json.skins.length;
+        this.json.skins.push(skin);
+        this.pendingSkins.push({ skin, bones: instance.bones });
+        return { index, joints, weights };
+    }
+    
+    /**
+     * NiTriShape / NiTriStrips 를 glTF 메시로 만든다. 같은 데이터 + 재질 + 스킨이면 다시 쓴다.
      * @param {object} shape 형상 블록
      * @param {object} props 이 형상에 걸린 속성
-     * @returns {number | null} glTF 메시 번호. 정점이나 삼각형이 없으면 null
+     * @returns {{ mesh: number, skin?: number } | null} 메시 번호 (스킨이 있으면 스킨 번호도). 그릴 것이 없으면 null
      */
     addMesh(shape, props) {
         const data = shape.data != null ? this.nif.blocks[shape.data] : null;
         if (!data?.vertices || !data.triangles?.length) return null;
+        // 빛/어둡게 레이어 빼기 옵션. 본체를 덮는 껍데기 메시라 Blender 에서 만질 때 거슬린다
+        if (this.options.skipEffects) {
+            const mode = blendMode(props.alpha != null ? this.nif.blocks[props.alpha] : null);
+            if (mode === "add" || mode === "multiply") return null;
+        }
         const materialIndex = this.addMaterial(props);
-        const key = `${shape.data}|${materialIndex}`;
+        const key = `${shape.data}|${materialIndex}|${shape.skinInstance ?? -1}`;
         if (this.meshCache.has(key)) return this.meshCache.get(key);
 
+        const skin = shape.skinInstance != null ? this.addSkin(shape.skinInstance, data.numVertices) : null;
         const attributes = { POSITION: this.addFloats(data.vertices, "VEC3", true) };
         if (data.normals) attributes.NORMAL = this.addFloats(data.normals, "VEC3");
         // UV 는 첫 세트만 쓴다. nif 의 v 축 방향은 glTF 와 같아서 그대로 넣는다
         if (data.uvSets.length > 0) attributes.TEXCOORD_0 = this.addFloats(data.uvSets[0], "VEC2");
         if (data.colors) attributes.COLOR_0 = this.addFloats(data.colors, "VEC4");
+        if (skin) {
+            attributes.JOINTS_0 = this.addJoints(skin.joints);
+            attributes.WEIGHTS_0 = this.addFloats(skin.weights, "VEC4");
+        }
 
-        const index = this.json.meshes.length;
+        const mesh = this.json.meshes.length;
         this.json.meshes.push({
             name: shape.name ?? undefined,
             primitives: [{ attributes, indices: this.addIndices(data.triangles, data.numVertices), material: materialIndex }],
         });
-        this.meshCache.set(key, index);
-        return index;
+        const built = { mesh, ...(skin ? { skin: skin.index } : {})};
+        this.meshCache.set(key, built);
+        return built;
     }
 
     /**
@@ -309,8 +510,10 @@ class Builder {
         const block = this.nif.blocks[blockIndex];
         // 읽지 않은 블록 (파티클, CsNiNode 등) 은 통째로 건너뛴다
         if (!block?.rotation) return null;
-        // 숨김 비트가 선 노드는 게임에서도 안 보인다
-        if (block.flags & 0x1) return null;
+        // 뼈로 쓰이는 노드는 숨김이든 비어 있든 남긴다 (스킨이 가리키기 때문이다)
+        const isBone = this.boneBlocks.has(blockIndex);
+        // 숨김 비트가 선 노드는 게임에서도 안 보인다 (FORMAT 9-2)
+        if (block.flags & 0x1 && !isBone) return null;
 
         // 이 노드에 걸린 속성으로 물려받은 것을 덮어쓴다
         const props = { ...inherited };
@@ -324,9 +527,21 @@ class Builder {
         const node = { name: block.name ?? undefined, ...nodeTransform(block) };
 
         if (block.type === "NiTriShape" || block.type === "NiTriStrips") {
-            const mesh = this.addMesh(block, props);
-            if (mesh == null) return null;
-            node.mesh = mesh;
+            const built = this.addMesh(block, props);
+            if (!built) return null;
+            node.mesh = built.mesh;
+            if (built.skin != null) {
+                node.skin = built.skin;
+                // glTF 는 스킨이 붙은 메시 노드의 변환을 무시한다 (뼈가 자리를 다 정한다).
+                // 변환을 지우고 뿌리에 달아서, 읽는 쪽이 헷갈리지 않게 한다
+                delete node.translation;
+                delete node.rotation;
+                delete node.scale;
+                const index = this.pushNode(blockIndex, node);
+                this.skinnedNodes.push(index);
+                // 부모의 자식 목록에는 넣지 않는다
+                return null;
+            }
         } else {
             const children = [];
             for (const c of block.children ?? []) {
@@ -334,13 +549,47 @@ class Builder {
                 const child = this.addNode(c, props);
                 if (child != null) children.push(child);
             }
-            // 메시도 자식도 없는 노드는 빈 껍데기라 버린다
-            if (children.length === 0) return null;
-            node.children = children;
+            // 메시도 자식도 없는 노드는 빈 껍데기라 버린다 (뼈는 남긴다)
+            if (children.length === 0 && !isBone) return null;
+            if (children.length > 0) node.children = children;
         }
 
+        return this.pushNode(blockIndex, node);
+    }
+
+    /**
+     * 만든 노드를 목록에 넣고, 블록 번호와 노드 번호를 이어 둔다 (뼈를 찾을 때 쓴다).
+     * @param {number} blockIndex nif 블록 번호
+     * @param {object} node glTF 노드
+     * @returns {number} glTF 노드 번호
+     */
+    pushNode(blockIndex, node) {
+        const index = this.json.nodes.length;
         this.json.nodes.push(node);
-        return this.json.nodes.length - 1;
+        this.nodeIndex.set(blockIndex, index);
+        return index;
+    }
+
+    /**
+     * 뿌리에서 닿을 수 있는 노드 블록을 모으고, 뼈로 쓰이는 블록도 모은다.
+     * 메시를 만들기 전에 알아야 한다 (뼈가 트리 밖이면 스킨을 포기해야 하고, 뼈 노드는 지우면 안 된다).
+     */
+    scanTree() {
+        /** @type {Set<number>} 뿌리에서 닿는 블록  */
+        this.reachable = new Set();
+        const walk = (index) => {
+            const block = this.nif.blocks[index];
+            if (!block?.rotation || this.reachable.has(index)) return;
+            this.reachable.add(index);
+            for (const c of block.children ?? []) if (c != null) walk(c);
+        };
+        for (const r of this.nif.roots) walk(r);
+
+        // 스킨이 가리키는 뼈 (트리를 도는 중에는 이미 늦으므로 미리 모은다)
+        for (const block of this.nif.blocks) {
+            if (block.type !== "NiSkinInstance") continue;
+            for (const b of block.bones) if (b != null) this.boneBlocks.add(b);
+        }
     }
 
     /**
@@ -351,18 +600,27 @@ class Builder {
         // 0번 노드는 축을 바꾸는 껍데기다. nif 는 Z 가 위, glTF 는 Y 가 위라 X 축으로 -90도 돌린다
         // (사원수 [x, y, z, w] = [sin(-45도), 0, 0, cos(-45도)])
         this.json.nodes.push({ name: "root", rotation: [-Math.SQRT1_2, 0, 0, Math.SQRT1_2] });
+        // 트리를 먼저 훑어서 뼈와 닿는 노드를 알아 둔다
+        this.scanTree();
         const children = [];
         for (const r of this.nif.roots) {
             const node = this.addNode(r, {});
             if (node != null) children.push(node);
         }
-        if (children.length === 0) throw new Error("No drawable geometry in this NIF");
-        this.json.nodes[0].children = children;
+        // 뼈 노드는 비어있어도 남기므로, 노드 수가 아니라 만들어진 메시로 판단한다
+        if (this.json.meshes.length === 0) throw new Error("No drawable geometry in this NIF");
+        if (children.length > 0) this.json.nodes[0].children = children;
+        // 스킨 메시는 장면 바로 밑에 둔다. 변환이 무시되는 노드라 축 바꾸기 껍데기 밑에 둘 이유가 없고,
+        // 뼈가 껍데기 밑에 있으므로 결과는 똑같이 Y 가 위로 선다
+        this.json.scenes = [{ nodes: [0, ...this.skinnedNodes] }];
+
+        // 이제 노드 번호를 알 수 있으니 스킨의 뼈 목록을 채운다
+        for (const { skin, bones } of this.pendingSkins) skin.joints = bones.map((b) => this.nodeIndex.get(b));
 
         // 텍스처가 하나도 없으면 샘플러도 쓸 데가 없다
         if (this.json.textures.length === 0) this.json.samplers = [];
         // 빈 목록은 glTF 검사기가 오류로 본다. 지운다
-        for (const k of ["meshes", "materials", "textures", "images", "samplers", "accessors", "bufferViews"]) {
+        for (const k of ["meshes", "skins", "materials", "textures", "images", "samplers", "accessors", "bufferViews"]) {
             if (this.json[k].length === 0) delete this.json[k];
         }
         const bin = Buffer.concat(this.bin);
@@ -419,6 +677,7 @@ function packGLB(json, bin) {
  * @param {object} [options] 설정
  * @param {(fileName: string) => Buffer | null} [options.resolveTexture] 외부 텍스처를 찾아 주는 함수
  * @returns {{ glb: Buffer, warnings: string[] }} GLB 내용과 경고 (못 찾은 텍스처 등)
+ * @param {boolean} [options.skipEffects] 빛과 어둡게 합성 레이어를 빼고 만든다
  */
 export function nifToGLB(nif, options) {
     const builder = new Builder(nif, options);
@@ -442,16 +701,17 @@ function readPackTexture(folder, dir, fileName) {
         const entry = folder.find(`${dir}\\${name}`);
         if (entry) return folder.read(entry);
     }
-    return null;
+    return null;ㄹ
 }
 
 /**
  * 팩 안의 모델 하나를 GLB 로 바꾼다. kfm 을 주면 그 안에 적힌 nif 를 대신 쓴다 (FORMAT 10-1).
  * @param {object} folder 열린 팩 폴더 (find, read 를 쓴다)
  * @param {string} packPath 팩 안의 경로. 예: "data\\digimon\\agumon\\agumon.nif"
+ * @param {object} [options] 설정. 지금은 skipEffects 하나뿐이다
  * @returns {{ glb: Buffer, warnings: string[], path: string }} GLB, 경고, 실제로 쓴 nif 경로
  */
-export function convertPackModel(folder, packPath) {
+export function convertPackModel(folder, packPath, options = {}) {
     // 팩 경로 구분자는 역슬래시다. 사용자가 / 로 적어도 받아 준다
     let target = packPath.replaceAll("/", "\\");
     const dir = target.slice(0, target.lastIndexOf("\\"));
@@ -464,6 +724,7 @@ export function convertPackModel(folder, packPath) {
     const entry = folder.find(target);
     if (!entry) throw new Error(`Not found in the pack: ${target}`);
     const result = nifToGLB(parseNif(folder.read(entry)), {
+        ...options,
         resolveTexture: (fileName) => readPackTexture(folder, dir, fileName),
     });
     return { ...result, path: target };

@@ -30,6 +30,7 @@ Options:
   -f, --filter <pattern>  Substring (e.g. agumon) or glob (e.g. data/digimon/**/*.nif). Case-insensitive.
   -o, --output <path>     Output folder for extract (default: ./extracted), file or folder for convert
       --format <format>   Model format for convert: glb (default)
+      --no-effects        Convert without the glow and darkening layers that sit on top of the model
   -h, --help              Show this help
 
 Convert takes a .nif, or a .kfm that names the model's .nif.`;
@@ -99,16 +100,17 @@ function extract(folder, filter, outDir) {
  * @param {string} packPath 팩 안의 nif 또는 kfm 경로
  * @param {string} [output] 출력 위치 (.glb 로 끝나면 파일, 아니면 폴더). 없으면 현재 폴더
  * @param {string} format 출력 형식
+ * @param {boolean} [skipEffects] 빛 (더하기) 과 어둡게 합성 레이어를 빼고 만든다
  * @returns {number} 종료 코드
  */
-function convert(folder, packPath, output, format) {
+function convert(folder, packPath, output, format, skipEffects) {
     // FBX 는 10단계에서 넣는다. 지금은 GLB 만 만든다
     if (format !== "glb") {
         console.error(`Unsupported format ${JSON.stringify(format)}. Only "glb" is available.`);
         return 1;
     }
 
-    const model = convertPackModel(folder, packPath);
+    const model = convertPackModel(folder, packPath, { skipEffects });
     // 출력이 .glb 로 끝나면 파일 이름으로, 아니면 폴더로 본다
     const name = path.basename(model.path).replace(/\.nif$/i, ".glb");
     const file = output && /\.glb$/i.test(output) ? output : path.join(output ?? ".", name);
@@ -134,6 +136,7 @@ export function main(argv) {
         options: {
             filter: { type: "string", short: "f" },
             output: { type: "string", short: "o" },
+            "no-effects": { type: "boolean" },
             format: { type: "string", default: "glb" },
             help: { type: "boolean", short: "h" },
         },
@@ -159,7 +162,7 @@ export function main(argv) {
     }
     try {
         if (command === "list") return list(folder, values.filter);
-        if (command === "convert") return convert(folder, target, values.output, values.format);
+        if (command === "convert") return convert(folder, target, values.output, values.format, values["no-effects"]);
         return extract(folder, values.filter, values.output ?? "extracted");
     } finally {
         folder.close();

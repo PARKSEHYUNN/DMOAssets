@@ -296,6 +296,66 @@ KDMO 1,111개, 7,798,812 B. 이벤트 타입 5 는 mp4 컷신.
 - kf 18,917개 중 18,370개가 `NiBSplineCompTransformInterpolator`. B-spline 디코더 필수. 그 외 `NiTransformInterpolator`, `NiFloatInterpolator`, `NiPoint3Interpolator` 등.
 - 예외: `data\digimon\cake\cake.nif`, `cake.kf` 는 빅엔디안 (엔디안 바이트 0). 건너뛴다.
 
+### 9-1. 블록 필드 배치 (2026-09-23 확인)
+
+nif.xml 은 버전마다 필드가 달라서, 아래 배치는 팩 전체로 확인한 것이다. 읽은 바이트 수가 블록 크기 표와
+정확히 같아야 통과하게 검사했고, nif 13,583개의 해당 블록 전부가 통과한다. 정렬은 없다 (필드가 그냥 이어진다).
+
+공통 조각:
+- `NiObjectNET` = u32 이름 (문자열 번호, -1 은 없음) + u32 개수 + 개수 x u32 추가 데이터 ref + u32 컨트롤러 ref
+- `NiAVObject` = NiObjectNET + **u16 flags** (u32 아니다) + 3f 이동 + 9f 회전 + 1f 배율 + u32 개수 + 속성 ref 들 + u32 충돌체 ref
+- `NiTransform` (NiSkinData 등) 순서는 **회전 9f → 이동 3f → 배율 1f**. NiAVObject 와 순서가 다르다
+
+블록별:
+| 블록 | 배치 |
+|---|---|
+| `NiNode` | NiAVObject + u32 자식 수 + ref 들 + u32 이펙트 수 + ref 들 |
+| `NiBillboardNode` | NiNode + u16 |
+| `NiTriShape` / `NiTriStrips` | NiAVObject + u32 data ref + u32 skinInstance ref + u32 재질 수 + (이름 i32) x n + (추가 i32) x n + i32 activeMaterial + u8 |
+| `NiGeometryData` | i32 groupID + u16 정점 수 + u8 keep + u8 compress + u8 있음 + 정점 3f + **u16 vectorFlags** + u8 법선 있음 + 법선 3f + (vectorFlags & 0x1000 이면 탄젠트, 바이탄젠트) + 바운딩 구 4f + u8 색 있음 + 색 4f + UV (vectorFlags & 0x3F 세트) + u16 + u32 ref |
+| `NiTriShapeData` | NiGeometryData + u16 삼각형 수 + u32 점 수 + u8 있음 + 삼각형 3 x u16 + u16 그룹 수 + (u16 개수 + u16 들) |
+| `NiTriStripsData` | NiGeometryData + u16 삼각형 수 + u16 스트립 수 + 스트립 길이 u16 들 + u8 있음 + 스트립마다 u16 정점 번호 |
+| `NiMaterialProperty` | NiObjectNET + ambient 3f + diffuse 3f + specular 3f + emissive 3f + 광택 1f + 알파 1f (총 68 B) |
+| `NiTexturingProperty` | NiObjectNET + u16 + u32 텍스처 칸 수 (7 또는 9) + u8 base 있음 + TexDesc + 나머지 칸들 |
+| TexDesc | u32 source ref + u16 + u8 UV 변환 있음 (있으면 5f + u32 + 2f) |
+| `NiAlphaProperty` | NiObjectNET + u16 flags + u8 임계값 (총 15 B). flags 비트 0 = 반투명 합성, 비트 9 = 알파 테스트 |
+| `NiSourceTexture` | NiObjectNET + u8 외부 여부 + u32 파일 이름 (문자열 번호) + u32 pixelData ref + u32 레이아웃 + u32 밉맵 + u32 알파 형식 + u8 x 3 (총 36 B). **외부/내장 둘 다 파일 이름 필드가 있다** |
+| `ATextureRenderData` (내장 텍스처 공통) | u32 픽셀 형식 + u8 bpp + i32 + u32 + u8 + u32 타일링 + **u8 (sRGB 로 추정)** + 채널 4개 x (u32 종류 + u32 방식 + u8 비트 + u8 부호) + u32 팔레트 ref + u32 밉맵 수 + u32 픽셀당 바이트 + 밉맵 (u32 가로, u32 세로, u32 시작 위치) |
+| `NiPersistentSrcTextureRendererData` | 위 + u32 픽셀 수 + u32 pad + u32 면 수 + u32 플랫폼 + 픽셀 |
+| `NiPixelData` | 위 + u32 픽셀 수 + u32 면 수 + 픽셀 |
+| `NiPalette` | **NiObjectNET 없음.** u8 알파 여부 + u32 색 수 + 색 수 x 4 B (R, G, B, A) |
+| `NiSkinInstance` | **NiObjectNET 없음.** u32 data ref + u32 partition ref + u32 skeletonRoot ref + u32 뼈 수 + 뼈 노드 ref 들 |
+| `NiSkinData` | NiTransform (전체) + u32 뼈 수 + u8 가중치 있음 + 뼈마다 (NiTransform + 바운딩 구 16 B + u16 정점 수 + (u16 정점 번호 + f32 가중치) x n) |
+
+- 채널 종류: 0 R, 1 G, 2 B, 3 A, 0x13 = 빈 칸. 압축 형식은 채널 0번이 종류 4 로 온다.
+- 픽셀 수는 한 면의 밉맵 전부를 합친 바이트 수다 (256x256 팔레트면 87,381).
+
+### 9-2. 변환 규칙과 함정
+
+- **행렬 규칙**: 열벡터다 (`v' = R * v * scale + t`). 행렬은 행 순서 (m11 m12 m13 m21 ...) 로 저장한다.
+  스킨 모델에서 `월드(뼈) * 뼈 변환` 이 모든 뼈에서 같은 값이 되는지로 확인했다 (같아야 맞다).
+  이 조합에서 오차 0, 행벡터로 보거나 NiTransform 순서를 바꾸면 145 이상 어긋난다.
+- **숨김 플래그**: NiAVObject flags 비트 0 이 서 있으면 그리지 않는다. 형상의 55%가 여기 해당하는데,
+  3ds Max 의 뼈/바이패드 헬퍼 지오메트리가 nif 에 그대로 들어가 있기 때문이다 (이름이 `Bone`, `Biped Object`).
+  거르지 않으면 모델에 상자 뭉치가 붙는다. 본체 메시는 보통 `0x16`, 헬퍼는 `0x17` 이다.
+- **속성 상속**: 재질/텍스처/알파 속성은 부모 노드에 걸려 있을 수 있다. 트리를 내려가며 물려받고, 같은 종류가 있으면 덮어쓴다.
+- **스트립**: 홀수 번째 삼각형은 감는 방향이 뒤집힌다. 번호가 겹치는 (넓이 0) 삼각형은 스트립을 잇는 용도라 버린다.
+- **파티클 전용 nif**: 이펙트 nif 중 532개는 그릴 형상이 전부 숨김이다. 메시가 `NiPSysMeshEmitter` 의 방출 틀이라 원래 안 보인다.
+- **스킨**: `NiSkinData` 의 가중치는 항상 들어 있다 (`hasVertexWeights` 가 1). 그래서 `NiSkinPartition` 은 읽지 않아도 된다.
+  정점 하나에 뼈가 최대 12개 붙지만 (5개 이상은 정점의 0.3%), glTF 는 4개까지라 큰 것 4개만 남기고 합을 1로 맞춘다.
+  glTF 의 역바인드 행렬은 `NiSkinData` 의 뼈 변환을 그대로 쓰면 된다.
+- **스킨 메시의 전체 변환**: `NiSkinData` 의 앞쪽 NiTransform 을 빼먹으면 어긋난다. 본체 메시는 대개 단위 행렬이지만
+  (8,808개 중 5,379개가 단위 아님), 이펙트 판은 345~464 단위까지 밀려 있다.
+- **강체 파츠 (Bone Parent)**: 노드 계층을 그대로 두면 뼈 노드의 자식으로 남아 애니메이션을 따라간다
+  (예: 아구몬 눈 = `GeoSphere02 < Dummy02 < Bip01 Head`). 스키닝으로 굳이 바꾸지 않으면 10-3 1번 이중 변환 함정도 없다.
+- **재질 색**: 이펙트 재질은 알파가 음수 (-0.8 등) 인 경우가 있다. glTF 는 0~1 만 받으므로 잘라야 검사기를 통과한다.
+- **합성 방식**: `NiAlphaProperty` flags 는 비트 0 이 합성 여부, 비트 1~4 가 원본 계수, 비트 5~8 이 도착지 계수다
+  (0 ONE, 1 ZERO, 2 SRC_COLOR, 3 INV_SRC_COLOR, 6 SRC_ALPHA, 7 INV_SRC_ALPHA).
+  팩 전체 30,026개의 분포: 더하기 (도착지 ONE) 18,264, 일반 알파 6,447, 어둡게 (ZERO -> INV_SRC_COLOR) 3,743, 나머지 1,053.
+  glTF 는 일반 알파 합성뿐이라, 더하기/어둡게 레이어를 그대로 두면 본체를 불투명하게 덮는다 (큰 모델이 검게 나오는 원인).
+  더하기는 밝기를 알파로 옮기고 같은 그림을 발광으로도 걸고, 어둡게는 색을 검게 두고 밝기를 알파로 쓰며 재질 발광을 뺀다.
+- **정지 상태에서 안 보이는 이펙트**: 이펙트 nif 는 재질 알파가 0 인 경우가 많다. 애니메이션이 알파를 올리는 구조라 정지 상태에서는 안 보이는 것이 맞다.
+
 ## 10. 모델과 텍스처
 
 ### 10-1. 디지몬 id 에서 파일까지
@@ -353,3 +413,6 @@ KDMO 1,111개, 7,798,812 B. 이벤트 타입 5 는 mp4 컷신.
 | XorTwist 꼬리 | `orig % 4 != 0` 인 표가 끝까지 읽기 검사를 통과 |
 | model.dat | 1,111개, 파일 끝에서 정확히 끝남 |
 | nif | 앞 38바이트 `Gamebryo File Format, Version 20.3.0.9`, 블록 크기 표 + footer 로 파일 끝 일치 |
+| nif 블록 | 해석하는 블록은 읽은 바이트 수 == 크기 표 값 (9-1). KDMO 13,583개 전부 통과 (빅엔디안 1개 제외) |
+| 내장 텍스처 | KDMO 68,378개 전부 디코드 성공 |
+| GLB | glTF Validator 오류 0. KDMO nif 13,584개 중 12,795개 변환, 나머지는 파티클 전용 532, `CsNiNode` 맵 203, 형상 없음 53, 빅엔디안 1 |

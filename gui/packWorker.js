@@ -10,10 +10,14 @@
  * 인덱싱 (수 초), 항목 읽기, 추출은 모두 여기서 한다. Electron 메인 프로세스가 멈추지 않게 하려는 것이다.
  * 메인과는 메세지로만 주고 받는다: 요청 { id, type, args }, 답 { id, ok, result | error }, 진행 { progress }.
  */
+
+import fs from "node:fs";
+import path from "node:path";
 import { parentPort } from "node:worker_threads";
 import { PackFolder, PackLockedError } from "../core/pack.js";
 import { filterEntries, extractEntries } from "../core/extract.js";
 import { decodeImage, encodePNG } from "../core/image.js";
+import { convertPackModel } from "../core/gltf.js";
 
 // 브라우저가 그대로 열 수 있는 이미지 확장자 (디코드 없이 바이트를 그대로 넘긴다)
 const BROWSER_IMAGES = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".bmp": "image/bmp", ".gif": "image/gif" };
@@ -79,10 +83,40 @@ function extract(names, outDir) {
     });
 }
 
+/**
+ * 모델 하나를 GLB 로 바꿔 렌더러에 넘긴다 (미리보기용).
+ * @param {string} name 팩 안의 nif 또는 kfm 경로
+ * @param {boolean} [skipEffects] 빛/어둡게 레이어를 빼고 만든다
+ * @returns {{ path: string, bytes: Buffer, warnings: string[] }} 실제로 쓴 nif 경로와 GLB
+ */
+function convert(name, skipEffects) {
+    if (!folder) throw new Error("No pack folder is open");
+    const model = convertPackModel(folder, name, { skipEffects });
+    return { path: model.path, bytes: model.glb, warnings: model.warnings };
+}
+
+/**
+ * 모델 하나를 GLB 파일로 저장한다 (내보내기).
+ * @param {string} name 팩 안의 nif 또는 kfm 경로
+ * @param {string} outDir 출력 폴더
+ * @param {boolean} [skipEffects] 빛/어둡게 레이어를 빼고 만든다
+ * @returns {{ file: string, bytes: number, warnings: string[] }}
+ */
+function exportModel(name, outDir, skipEffects) {
+    if (!folder) throw new Error("No pack folder is open");
+    const model = convertPackModel(folder, name, { skipEffects });
+    // 팩 안 이름 그대로, 확장자만 바꿔 저장한다
+    const file = path.join(outDir, path.basename(model.path).replace(/\.nif$/i, ".glb"));
+    fs.writeFileSync(file, model.glb);
+    return { file, bytes: model.glb.length, warnings: model.warnings };
+}
+
 // 메인이 보낸 요청을 종류에 따라 처리하고 결과를 돌려준다
 const handlers = {
     open: ({ dir }) => open(dir),
     preview: ({ name }) => preview(name),
+    convert: ({ name, skipEffects }) => convert(name, skipEffects),
+    exportModel: ({ name, outDir, skipEffects }) => exportModel(name, outDir, skipEffects),
     extract: ({ names, outDir }) => extract(names, outDir),
     // 패턴에 맞는 항목 이름만 돌려준다 (glob 검색용. 화면 검색은 렌더러가 직접 한다)
     find: ({ pattern }) => filterEntries(folder.entries, pattern).map((e) => e.name),

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self' blob:; connect-src 'self' blob:; style-src 'self' 'unsafe-inline'" />
     <title>DMOAssets</title>
     <style>
       /* 색은 한곳에 모아 둔다 (어두운 화면 하나만 쓴다) */
@@ -58,6 +58,9 @@
       main { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
       #tree { overflow: auto; padding: 6px 10px; border-right: 1px solid var(--line); }
       #preview { overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+      /* 모델 뷰어 캔버스. 남는 자리를 다 쓰고, 모델이 없을 때는 hidden 이라 자리를 차지하지 않는다 */
+      #viewer { display: block; width: 100%; flex: 1; min-height: 0; border-radius: 4px; }
+      #viewer[hidden] { display: none; }
       /* 미리보기 이미지는 바둑판 배경 위에 올려 투명한 부분을 보이게 한다 */
       #preview img {
         max-width: 100%;
@@ -76,6 +79,9 @@
       .file.sel { background: var(--accent); color: #fff; }
       .size { color: var(--dim); margin-left: 6px; }
       footer { padding: 6px 10px; border-top: 1px solid var(--line); color: var(--dim); }
+      /* 체크박스는 글자와 붙여 놓는다 (입력칸처럼 늘어나면 안 된다) */
+      label.opt { display: flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; }
+      label.opt input { flex: none; min-width: 0; margin: 0; }
     </style>
   </head>
   <body>
@@ -83,13 +89,32 @@
       <button id="openBtn">Open DMO folder…</button>
       <span id="dir">No folder open</span>
       <input id="search" type="search" placeholder="Search path (e.g. agumon)" disabled />
+      <label class="opt" title="Drop the glow and darkening layers that sit on top of the model">
+        <input id="noEffects" type="checkbox" />
+        No effect layers
+      </label>
       <button id="extractBtn" disabled>Extract…</button>
+      <button id="exportBtn" disabled>Export GLB…</button>
     </header>
     <main>
       <div id="tree"></div>
-      <div id="preview"><div id="info">Open a DMO Data folder to start.</div></div>
+      <div id="preview">
+        <canvas id="viewer" hidden></canvas>
+        <div id="info">Open a DMO Data folder to start.</div>
+      </div>
     </main>
     <footer id="status">Ready</footer>
+    <!-- three.js 는 번들러 없이 import map 으로 node_modules 에서 바로 읽는다.
+         import map 은 인라인만 되고 (외부 파일은 이 Chromium 에서 안 읽는다), 그래서 CSP 에 script-src 'unsafe-inline' 이 필요하다.
+         이 창은 로컬 파일만 열고 팩 내용을 HTML 로 만들지 않으므로 (전부 textContent) 위험이 없다 -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "../node_modules/three/build/three.module.js",
+          "three/addons/": "../node_modules/three/examples/jsm/"
+        }
+      }
+    </script>
     <script type="module" src="renderer.js"></script>
   </body>
 </html>

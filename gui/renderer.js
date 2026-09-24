@@ -7,8 +7,10 @@
 /**
  * 화면 쪽 코드, Node 접근 권한이 없고, perload 가 열어 준 window.api 만 쓴다.
  * 
- * 하는 일: 팩 폴더 열기, 파일 트리 그리기, 검색, 미리보기, 추출
+ * 하는 일: 팩 폴더 열기, 파일 트리 그리기, 검색, 미리보기 (이미지와 모델), 추출, GLB 내보내기
  */
+
+import { showModel, clearModel } from "./viewer.js";
 
 const $ = (id) => document.getElementById(id);
 const treeEl = $("tree");
@@ -16,6 +18,13 @@ const infoEl = $("info");
 const statusEl = $("status");
 const searchEl = $("search");
 const extractBtn = $("extractBtn");
+const exportBtn = $("exportBtn");
+const noEffectsEl = $("noEffects");
+const viewerEl = $("viewer");
+const previewEl = $("preview");
+
+/** 모델로 열 수 있는 확장자. kfm 은 안에 적힌 nif 를 따라간다 (FORMAT 10-1) */
+const MODEL_EXTS = new Set([".nif", ".kfm"]);
 
 /** @type {{ name: string, size: number }[]} 열린 팩의 모든 항목 */
 let entries = [];
@@ -136,6 +145,60 @@ function select(path, isFolder) {
     if (!isFolder) treeEl.querySelector(`.file[data-path="${CSS.escape(path)}"]`)?.classList.add("sel");
     extractBtn.disabled = false;
     extractBtn.textContent = isFolder ? "Extract folder…" : "Extract file…";
+
+    // GLB 내보내기는 모델 파일을 골랐을 때만 쓸 수 있다
+    exportBtn.disabled = isFolder || !isModel(path);
+}
+
+/**
+ * 모델로 열 수 있는 파일인지 본다.
+ * @param {string} name 팩 안의 경로
+ * @returns {boolean}
+ */
+function isModel(name) {
+    return MODEL_EXTS.has(name.slice(name.lastIndexOf(".")).toLowerCase());
+}
+
+/**
+ * 오른쪽 미리보기를 비운다 (이미지 주소를 풀고, 모델을 치운다).
+ */
+function resetPreview() {
+    // 이전 이미지 주소를 풀어 준다 (안 하면 메모리가 쌓인다)
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = null;
+    previewEl.querySelector("img")?.remove();
+    viewerEl.hidden = true;
+    clearModel();
+}
+
+/**
+ * 고른 모델을 GLB 로 바꿔 뷰어에 띄운다.
+ * 워커가 만든 GLB 를 그대로 쓰므로, 여기서 제대로 보이면 내보낸 파일도 같다.
+ * @param {string} name 팩 안의 nif 또는 kfm 경로
+ */
+async function showModelPreview(name) {
+    setStatus(`Converting ${name}…`);
+    const r = await window.api.convert(name, noEffectsEl.checked);
+    resetPreview();
+    if (!r.ok) {
+        infoEl.textContent = `${name}\n\nError: ${r.error}`;
+        setStatus("Ready");
+        return;
+    }
+
+    viewerEl.hidden = false;
+    try {
+        const { size, meshes } = await showModel(viewerEl, r.result.bytes);
+        const dim = size.map((v) => Math.round(v)).join(" x ");
+        setStatus(`${r.result.path} — ${meshes} meshes, ${dim}, ${humanSize(r.result.bytes.length)} GLB`);
+    } catch (e) {
+        viewerEl.hidden = true;
+        infoEl.textContent = `${name}\n\nError: ${e.message}`;
+        setStatus("Ready");
+        return;
+    }
+    // 텍스처를 못 찾았으면 알려 준다 (FORMAT 10-3 2번)
+    infoEl.textContent = r.result.warnings.length ? `${name}\n\n${r.result.warnings.join("\n")}` : name;
 }
 
 /**
@@ -143,12 +206,12 @@ function select(path, isFolder) {
  * @param {string} name 팩 안의 경로
  */
 async function showPreview(name) {
+    // nif, kfm 은 모델이라 GLB 로 바꿔 뷰어에 띄운다
+    if (isModel(name)) return showModelPreview(name);
+
     setStatus(`Reading ${name}…`);
     const r = await window.api.preview(name);
-    // 이전 이미지 주소를 풀어 준다 (안 하면 메모리가 쌓인다)
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    previewUrl = null;
-    document.getElementById("preview").replaceChildren(infoEl);
+    resetPreview();
 
     if (!r.ok) {
         infoEl.textContent = `${name}\n\nError: ${r.error}`;
@@ -161,7 +224,7 @@ async function showPreview(name) {
         const img = document.createElement("img");
         img.src = previewUrl;
         img.onload = () => setStatus(`${name} — ${img.naturalWidth}x${img.naturalHeight}`);
-        document.getElementById("preview").append(img);
+        previewEl.append(img);
         infoEl.textContent = name;
     } else {
         // 이미지가 아니면 크기만 (또는 미리보기 못 하는 이유를) 보여 준다
@@ -221,7 +284,15 @@ $('openBtn').onclick = async () => {
   searchEl.disabled = false;
   searchEl.value = '';
   showSearch('');
+// 다른 팩을 열면 보고 있던 이미지나 모델은 치운다
+  resetPreview();
+  exportBtn.disabled = true;
   infoEl.textContent = 'Select a file to preview it.';
+};
+
+// 옵션을 바꾸면 보고 있던 모델을 다시 변환해서 바로 비교할 수 있게 한다
+noEffectsEl.onchange = () => {
+    if (selected && !selectedIsFolder && isModel(selected)) showModelPreview(selected);
 };
 
 // 검색어를 칠 때마다 다시 그린다
@@ -245,6 +316,23 @@ extractBtn.onclick = async () => {
   setStatus(`Extracted ${files} files (${humanSize(bytes)}) to ${outDir}${failed.length ? ` — ${failed.length} failed` : ''}`);
   // 실패한 항목이 있으면 오른쪽에 목록을 보여 준다
   if (failed.length) infoEl.textContent = `Failed:\n${failed.map((f) => `${f.name}: ${f.error}`).join('\n')}`;
+};
+
+// 내보내기: 고른 모델을 GLB 파일로 저장한다 (미리보기와 같은 변환을 쓴다)
+exportBtn.onclick = async () => {
+    const outDir = await window.api.chooseFolder("Select the output folder");
+    if (!outDir) return;
+    exportBtn.disabled = true;
+    setStatus(`Converting ${selected}…`);
+    const r = await window.api.exportModel(selected, outDir, noEffectsEl.checked);
+    exportBtn.disabled = false;
+    if (!r.ok) {
+        setStatus(`Export failed: ${r.error}`);
+        return;
+    }
+    setStatus(`Wrote ${r.result.file} (${humanSize(r.result.bytes)})`);
+    // 텍스처를 못 찾았으면 알려 준다 (FORMAT 10-3 2번)
+    if (r.result.warnings.length) infoEl.textContent = `${selected}\n\n${r.result.warnings.join("\n")}`;
 };
 
 // 추출 진행 상황

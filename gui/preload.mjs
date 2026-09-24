@@ -34,6 +34,23 @@ contextBridge.exposeInMainWorld("api", {
     preview: (name) => ipcRenderer.invoke("call", "preview", { name }),
 
     /**
+     * 모델 하나를 GLB 로 바꿔 받는다 (미리보기용, 파일로 저장하지 않는다).
+     * @param {string} name 팩 안의 nif 또는 kfm 경로
+     * @param {boolean} skipEffects 빛/어둡게 레이어를 빼고 만든다
+     * @returns {Promise<{ ok: boolean, result?: object, error?: string }>}
+     */
+    convert: (name, skipEffects) => ipcRenderer.invoke("call", "convert", { name, skipEffects }),
+
+    /**
+     * 모델 하나를 GLB 파일로 저장한다.
+     * @param {string} name 팩 안의 nif 또는 kfm 경로
+     * @param {string} outDir 출력 폴더
+     * @param {boolean} skipEffects 빛/어둡게 레이어를 빼고 만든다
+     * @returns {Promise<{ ok: boolean, result?: object, error?: string }>}
+     */
+    exportModel: (name, outDir, skipEffects) => ipcRenderer.invoke("call", "exportModel", { name, outDir, skipEffects }),
+
+    /**
      * 고른 항목들을 풀어 쓴다.
      * @param {string[]} names 팩 안의 경로 목록
      * @param {string} outDir 출력 폴더

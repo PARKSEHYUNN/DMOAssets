@@ -31,6 +31,7 @@ Options:
   -o, --output <path>     Output folder for extract (default: ./extracted), file or folder for convert
       --format <format>   Model format for convert: glb (default)
       --no-effects        Convert without the glow and darkening layers that sit on top of the model
+      -- no-anim          Convert without the animations a .kfm points at
   -h, --help              Show this help
 
 Convert takes a .nif, or a .kfm that names the model's .nif.`;
@@ -101,23 +102,25 @@ function extract(folder, filter, outDir) {
  * @param {string} [output] 출력 위치 (.glb 로 끝나면 파일, 아니면 폴더). 없으면 현재 폴더
  * @param {string} format 출력 형식
  * @param {boolean} [skipEffects] 빛 (더하기) 과 어둡게 합성 레이어를 빼고 만든다
+ * @param {boolean} [skipAnimations] kfm 이 가리키는 동작을 넣지 않는다
  * @returns {number} 종료 코드
  */
-function convert(folder, packPath, output, format, skipEffects) {
+function convert(folder, packPath, output, format, skipEffects, skipAnimations) {
     // FBX 는 10단계에서 넣는다. 지금은 GLB 만 만든다
     if (format !== "glb") {
         console.error(`Unsupported format ${JSON.stringify(format)}. Only "glb" is available.`);
         return 1;
     }
 
-    const model = convertPackModel(folder, packPath, { skipEffects });
+    const model = convertPackModel(folder, packPath, { skipEffects, skipAnimations });
     // 출력이 .glb 로 끝나면 파일 이름으로, 아니면 폴더로 본다
     const name = path.basename(model.path).replace(/\.nif$/i, ".glb");
     const file = output && /\.glb$/i.test(output) ? output : path.join(output ?? ".", name);
     fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
     fs.writeFileSync(file, model.glb);
 
-    console.error(`Wrote ${file} (${(model.glb.length / 1024 / 1024).toFixed(1)} MB) from ${model.path}`);
+    const anims = model.animations ? `, ${model.animations} animations` : "";
+    console.error(`Wrote ${file} (${(model.glb.length / 1024 / 1024).toFixed(1)} MB${anims}) from ${model.path}`);
     // 텍스처를 못 찾으면 모델이 민짜로 나온다. 조용히 넘기지 않고 알린다 (FORMAT 10-3 2번)
     for (const w of model.warnings) console.error(`  ${w}`);
     return 0;
@@ -137,6 +140,7 @@ export function main(argv) {
             filter: { type: "string", short: "f" },
             output: { type: "string", short: "o" },
             "no-effects": { type: "boolean" },
+            "no-anim": { type: "boolean" },
             format: { type: "string", default: "glb" },
             help: { type: "boolean", short: "h" },
         },
@@ -162,7 +166,7 @@ export function main(argv) {
     }
     try {
         if (command === "list") return list(folder, values.filter);
-        if (command === "convert") return convert(folder, target, values.output, values.format, values["no-effects"]);
+        if (command === "convert") return convert(folder, target, values.output, values.format, values["no-effects"], values["no-anim"]);
         return extract(folder, values.filter, values.output ?? "extracted");
     } finally {
         folder.close();

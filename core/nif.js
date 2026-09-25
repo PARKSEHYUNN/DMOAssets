@@ -56,6 +56,13 @@ class Reader {
         return v;
     }
 
+    /** @returns {number} i16 하나 (B-spline 제어점) */
+    i16() {
+        const v = this.buf.readInt16LE(this.pos);
+        this.pos += 2;
+        return v;
+    }
+
     /** @returns {number} i32 하나 */
     i32() {
         const v = this.buf.readInt32LE(this.pos);
@@ -506,6 +513,166 @@ function readPalette(r) {
     return { colors };
 }
 
+/**
+ * 키 묶음 (KeyGroup) 을 읽는다. 애니메이션 곡선 한 채널이다 (FORMAT 9-3).
+ * 보간 2 (2차) 는 값 뒤에 나가는 접선과 들어오는 접선이 붙고, 3 (TBC) 은 계수가 3개 붙는다.
+ * @param {Reader} r 커서
+ * @param {number} width 값의 float 개수 (이동 3, 크기/각도 1)
+ * @returns {object} { interpolation, keys }
+ */
+function readKeyGroup(r, width) {
+    const num = r.u32();
+    // 키가 없으면 보간 종류 자리도 없다
+    if (num === 0) return { interpolation: 0, keys: [] };
+    const interpolation = r.u32();
+    const keys = [];
+    for (let i = 0; i < num; i ++) {
+        const time = r.f32();
+        const value = r.floats(width);
+        const tangents = interpolation === 2 ? [r.floats(width), r.floats(width)] : null;
+        if (interpolation === 3) r.floats(3); // TBC (tension, bias, continuity)
+        keys.push({ time, value, tangents });
+    }
+    return { interpolation, keys };
+}
+
+/**
+ * NiControllerSequence 를 읽는다. kf 파일의 뿌리 블록이고, 동작 하나를 담는다 (FORMAT 9-3).
+ * @param {Reader} r 커서
+ * @param {string[]} strings 문자열 표
+ * @returns {object}
+ */
+function readControllerSequence(r, strings) {
+    const name = strings[r.u32()];
+    const num = r.u32();
+    r.u32();
+    const controlled = [];
+    for (let i = 0; i < num; i ++) {
+        // 20.1.0.3 이후로는 이름을 문자열 표 번호로 적는다 (그 전에는 string palette 였다)
+        controlled.push({
+            interpolator: r.ref(),
+            controller: r.ref(),
+            node: strings[r.u32()],
+            propertyType: strings[r.u32()],
+            controllerType: strings[r.u32()],
+            controllerId: strings[r.u32()],
+            interpolatorId: strings[r.u32()],
+        });
+    }
+
+    const weight = r.f32();
+    const textKeys = r.ref();
+    const cycleType = r.u32();
+    const frequency = r.f32();
+    const start = r.f32();
+    const stop = r.f32();
+    r.u32(); // manager (포인터라 파일 안에서는 뜻이 없다)
+    const accumRoot = strings[r.u32()];
+    r.u32(); // 누적 축 플래그 (안 쓴다)
+    return { name, controlled, weight, textKeys, cycleType, frequency, start, stop, accumRoot };
+}
+
+/**
+ * NiTextKeyExtraData 를 읽는다. "start", "end" 같은 구간 표시가 들어 있다.
+ * @param {Reader} r 커서
+ * @param {string[]} strings 문자열 표
+ * @returns {object}
+ */
+function readTextKeys(r, strings) {
+    strings[r.u32()]; // 이름 (안 쓴다)
+    const num = r.u32();
+    const keys = [];
+    for (let i = 0; i < num; i ++) keys.push({ time: r.f32(), text: strings[r.u32()] });
+    return { keys };
+}
+
+/**
+ * NiTransformInterpolator 를 읽는다. 곡선이 없을 때 쓸 기본 변환과 곡선 블록 번호가 들어 있다.
+ * 기본값 자리는 안 쓰면 NaN 으로 채워져 있다 (FORMAT 9-3).
+ * @param {Reader} r 커서
+ * @returns {object}
+ */
+function readTransformInterpolator(r) {
+    return { translation: r.floats(3), rotation: r.floats(4), scale: r.f32(), data: r.ref() };
+}
+
+/**
+ * NiTransformData 를 읽는다. 노드 하나의 이동/회전/크기 곡선이다.
+ * 회전은 사원수 키이거나 (종류 1, 3), 축마다 따로인 오일러 곡선이다 (종류 4, FORMAT 9-3).
+ * @param {Reader} r 커서
+ * @returns {object}
+ */
+function readTransformData(r) {
+    const numRotation = r.u32();
+    let rotationType = 0;
+    let rotations = [];
+    let euler = null;
+    if (numRotation !== 0) {
+        rotationType = r.u32();
+        if (rotationType === 4) {
+            // 오일러: X, Y, Z 곡선이 이어서 온다 (위의 개수는 1 로 적혀 있다)
+            euler = [readKeyGroup(r, 1), readKeyGroup(r, 1), readKeyGroup(r, 1)];
+        } else {
+            for (let i = 0; i < numRotation; i ++) {
+                const time = r.f32();
+                const value = r.floats(4);
+                if (rotationType === 3) r.floats(3); // TBC
+                rotations.push({ time, value });
+            }
+        }
+    }
+    return { rotationType, rotations, euler, translations: readKeyGroup(r, 3), scales: readKeyGroup(r, 1) };
+}
+
+/**
+ * NiBSplineCompTransformInterpolator 를 읽는다. 곡선을 짧은 정수로 눌러 담은 형식이다 (FORMAT 9-3).
+ * @param {Reader} r 커서
+ * @returns {object} 
+ */
+function readBSplineInterpolator(r) {
+    return {
+        start: r.f32(),
+        stop: r.f32(),
+        splineData: r.ref(),
+        basisData: r.ref(),
+        translation: r.floats(3),
+        rotation: r.floats(4),
+        scale: r.f32(),
+        // 0xffff 는 그 채널이 없다는 뜻이다
+        translationOffset: r.u32(),
+        rotationOffset: r.u32(),
+        scaleOffset: r.u32(),
+        translationBias: r.f32(),
+        translationMultiplier: r.f32(),
+        rotationBias: r.f32(),
+        rotationMultiplier: r.f32(),
+        scaleBias: r.f32(),
+        scaleMultiplier: r.f32(),
+    };
+}
+
+/**
+ * NiBSplineData 를 읽는다. 모든 채널의 제어점이 여기 한 줄로 들어 있다.
+ * @param {Reader} r 커서
+ * @returns {object}
+ */
+function readBSplineData(r) {
+    const floats = r.floats(r.u32());
+    const n = r.u32();
+    const shorts = new Int16Array(n);
+    for (let i = 0; i < n; i ++) shorts[i] = r.i16();
+    return { floats, shorts };
+}
+
+/**
+ * NiBSplineBasisData 를 읽는다. 채널 하나에 제어점이 몇 개인지 알려 준다.
+ * @param {Reader} r 커서
+ * @returns {object}
+ */
+function readBSplineBasisData(r) {
+    return { controlPoints: r.u32() };
+}
+
 /** 블록 종류별 읽기 함수. 여기 없는 종류는 크기만큼 건너뛴다 */
 const READERS = {
     NiNode: (r, s) => readNode(r, s, false),
@@ -523,6 +690,14 @@ const READERS = {
     NiPersistentSrcTextureRendererData: readPersistentTexture,
     NiPixelData: readPixelData,
     NiPalette: readPalette,
+    // kf 애니메이션 블록 (FORMAT 9-3). kf 는 nif 와 같은 형식이라 같은 파서로 읽는다
+    NiControllerSequence: readControllerSequence,
+    NiTextKeyExtraData: readTextKeys,
+    NiTransformInterpolator: readTransformInterpolator,
+    NiTransformData: readTransformData,
+    NiBSplineCompTransformInterpolator: readBSplineInterpolator,
+    NiBSplineData: readBSplineData,
+    NiBSplineBasisData: readBSplineBasisData,
 };
 
 /** 앞부분만 읽고 나머지는 건너뛰는 블록 종류 (읽은 길이 검사에서 뺀다) */
@@ -634,6 +809,19 @@ export function decodePixelData(block, palette) {
     const bpp = shift;
     if (!bpp) throw new Error(`Unsupported embedded pixel format ${block.pixelFormat}`);
     return decodeMasked(data, width, height, bpp, masks);
+}
+
+/**
+ * kfm 파일에서 동작 (.kf) 파일 이름 목록을 꺼낸다 (FORMAT 10-1).
+ * nif 이름과 같은 방법으로 뽑는다. 순서는 kfm 에 적힌 순서 그대로다.
+ * @param {Buffer} buf kfm 파일 전체
+ * @returns {string[]} kf 파일 이름 (kfm 과 같은 폴더에 있다)
+ */
+export function kfmKfNames(buf) {
+    const found = buf.toString("latin1").match(/[\x20-\x7e]{4,}/g) ?? [];
+    // ".\name.kf" 처럼 적혀 있다. 폴더 표시를 떼고, 같은 이름이 여러 번 나오면 한 번만 쓴다
+    const names = found.filter((s) => /\.kf$/i.test(s)).map((s) => s.split(/[\\/]/).pop());
+    return [...new Set(names)];
 }
 
 /**

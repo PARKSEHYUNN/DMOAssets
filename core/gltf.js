@@ -13,7 +13,8 @@
  */
 
 import { decodeImage, encodePNG } from "./image.js";
-import { decodePixelData, kfmNifName, parseNif } from "./nif.js";
+import { decodePixelData, kfmKfNames, kfmNifName, parseNif } from "./nif.js";
+import { sampleAnimations } from "./kf.js";
 
 /** glTF 상수: 실수 3개 배열 등 */
 const FLOAT = 5126;
@@ -329,6 +330,28 @@ class Builder {
     }
 
     /**
+     * 애니메이션 표본을 accessor 로 만든다.
+     * 정점 속성이 아니므로 bufferView 에 target 을 붙이지 않는다 (glTF 규칙).
+     * @param {number[]} values 값 (속성이 이어 붙은 형태)
+     * @param {"SCALAR"|"VEC3"|"VEC4"} type 성분 묵음
+     * @param {boolean} [bounds] 최소/최대를 적는다 (시간 accessor 에는 필수다)
+     * @returns {number} accessor 번호
+     */
+    addSamples(values, type, bounds) {
+        const size = { SCALAR: 1, VEC3: 3, VEC4: 4 }[type];
+        const buf = Buffer.alloc(values.length * 4);
+        for (let i = 0; i < values.length; i ++) buf.writeFloatLE(values[i], i * 4);
+        const accessor = { bufferView: this.addView(buf), componentType: FLOAT, count: values.length / size, type };
+        if (bounds) {
+            // 시간 accessor 는 min, max 가 없으면 검사기가 오류로 본다
+            accessor.min = [values.reduce((a, b) => Math.min(a, b), Infinity)];
+            accessor.max = [values.reduce((a, b) => Math.max(a, b), -Infinity)];
+        }
+        this.json.accessors.push(accessor);
+        return this.json.accessors.length - 1;
+    }
+
+    /**
      * 4x4 행렬 목록을 accessor 로 만든다 (역바인드 행렬용).
      * 정점 속성이 아니므로 bufferView 에 target 을 붙이지 않는다 (glTF 규칙).
      * @param {number[]} values 행렬 값 (행렬마다 16개)
@@ -571,6 +594,44 @@ class Builder {
     }
 
     /**
+     * 표본으로 뜬 kf 애니메이션을 glTF animation 으로 만든다 (FORMAT 9-3).
+     * kf 는 대상을 노드 이름으로 적으므로 이름으로 노드를 찾는다. 같은 이름이 여럿이면 먼저 나온 것을 쓴다.
+     * 모델에 없는 이름 (이펙트용 더미 등) 을 가리키는 트랙은 버린다.
+     */
+    addAnimations() {
+        const list = this.options.animations ?? [];
+        if (list.length === 0) return;
+        /** @type {Map<string, number>} 노드 이름 -> glTF 노드 번호 */
+        const byName = new Map();
+        for (const [block, index] of this.nodeIndex) {
+            const name = this.nif.blocks[block].name;
+            if (name != null && !byName.has(name)) byName.set(name, index);
+        }
+
+        const animations = [];
+        for (const anim of list) {
+            const samplers = [];
+            const channels = [];
+            for (const track of anim.tracks) {
+                const node = byName.get(track.node);
+                if (node == null) continue;
+                for (const [path, channel] of [["translation", track.translation], ["rotation", track.rotation], ["scale", track.scale]]) {
+                    if (!channel) continue;
+                    // nif 의 크기는 값 하나지만 glTF 는 축마다 따로라 세 번 적는다
+                    const values = path === "scale" ? channel.values.flatMap((s) => [s, s, s]) : channel.values;
+                    const input = this.addSamples(channel.times, "SCALAR", true);
+                    const output = this.addSamples(values, path === "rotation" ? "VEC4" : "VEC3");
+                    channels.push({ sampler: samplers.length, target: { node, path } });
+                    samplers.push({ input, output, interpolation: "LINEAR" });
+                }
+            }
+            // 쓸 채널이 하나도 없는 동작은 넣지 않는다 (빈 animation 은 glTF 오류다)
+            if (channels.length > 0) animations.push({ name: anim.name, samplers, channels });
+        }
+        if (animations.length > 0) this.json.animations = animations; 
+    }
+
+    /**
      * 뿌리에서 닿을 수 있는 노드 블록을 모으고, 뼈로 쓰이는 블록도 모은다.
      * 메시를 만들기 전에 알아야 한다 (뼈가 트리 밖이면 스킨을 포기해야 하고, 뼈 노드는 지우면 안 된다).
      */
@@ -616,6 +677,8 @@ class Builder {
 
         // 이제 노드 번호를 알 수 있으니 스킨의 뼈 목록을 채운다
         for (const { skin, bones } of this.pendingSkins) skin.joints = bones.map((b) => this.nodeIndex.get(b));
+        // 애니메이션 노드 번호를 가리키므로 노드를 다 만든 뒤에 붙인다
+        this.addAnimations();
 
         // 텍스처가 하나도 없으면 샘플러도 쓸 데가 없다
         if (this.json.textures.length === 0) this.json.samplers = [];
@@ -678,6 +741,7 @@ function packGLB(json, bin) {
  * @param {(fileName: string) => Buffer | null} [options.resolveTexture] 외부 텍스처를 찾아 주는 함수
  * @returns {{ glb: Buffer, warnings: string[] }} GLB 내용과 경고 (못 찾은 텍스처 등)
  * @param {boolean} [options.skipEffects] 빛과 어둡게 합성 레이어를 빼고 만든다
+ * @param {object[]} [options.animations] kf.js 가 표본으로 뜬 애니메이션 목록
  */
 export function nifToGLB(nif, options) {
     const builder = new Builder(nif, options);
@@ -701,7 +765,34 @@ function readPackTexture(folder, dir, fileName) {
         const entry = folder.find(`${dir}\\${name}`);
         if (entry) return folder.read(entry);
     }
-    return null;ㄹ
+    return null;
+}
+
+/**
+ * kfm 이 적어 둔 kf 파일을 모두 읽어 애니메이션 표본으로 만든다 (FORMAT 10-1).
+ * kf 하나가 깨져도 모델은 봐야 하므로, 실패한 동작은 경고로 남기고 건너뛴다.
+ * @param {object} folder 열린 팩 폴더 (find, read 를 쓴다)
+ * @param {string} dir kfm 이 있는 팩 안의 폴더
+ * @param {Buffer} kfmBuf kfm 파일 내용
+ * @param {string[]} warnings 경고를 모을 배열
+ * @returns {object[]} 애니메이션 목록
+ */
+function readPackAnimations(folder, dir, kfmBuf, warnings) {
+    const out = [];
+    for (const name of kfmKfNames(kfmBuf)) {
+        const entry = folder.find(`${dir}\\${name}`);
+        if (!entry) {
+            warnings.push(`Animation file not found in the pack: ${name}`);
+            continue;
+        }
+        try {
+            // kf 는 nif 와 같은 형식이라 같은 파서로 읽는다
+            out.push(...sampleAnimations(parseNif(folder.read(entry))));
+        } catch (e) {
+            warnings.push(`Animation skipped (${name}): ${e.message}`);
+        }
+    }
+    return out;
 }
 
 /**
@@ -715,17 +806,24 @@ export function convertPackModel(folder, packPath, options = {}) {
     // 팩 경로 구분자는 역슬래시다. 사용자가 / 로 적어도 받아 준다
     let target = packPath.replaceAll("/", "\\");
     const dir = target.slice(0, target.lastIndexOf("\\"));
+    /** @type {object[]} kfm 이 알려 준 동작 (nif 만 주면 동작은 없다) */
+    let animations = [];
+    /** @type {string[]} 애니메이션을 읽다가 생긴 경고 */
+    const warnings = [];
     if (/\.kfm$/i.test(target)) {
         const kfm = folder.find(target);
         if (!kfm) throw new Error(`Not found in the pack: ${target}`);
+        const buf = folder.read(kfm);
         // kfm 은 모델 nif 이름을 알려 준다. nif 는 kfm 과 같은 폴더에 있다
-        target = `${dir}\\${kfmNifName(folder.read(kfm))}`;
+        target = `${dir}\\${kfmNifName(buf)}`;
+        if (!options.skipAnimations) animations = readPackAnimations(folder, dir, buf, warnings);
     }
     const entry = folder.find(target);
     if (!entry) throw new Error(`Not found in the pack: ${target}`);
     const result = nifToGLB(parseNif(folder.read(entry)), {
         ...options,
+        animations,
         resolveTexture: (fileName) => readPackTexture(folder, dir, fileName),
     });
-    return { ...result, path: target };
+    return { ...result, warnings: [...warnings, ...result.warnings], path: target, animations: animations.length };
 }

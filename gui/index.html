@@ -79,6 +79,18 @@
       .file.sel { background: var(--accent); color: #fff; }
       .size { color: var(--dim); margin-left: 6px; }
       footer { padding: 6px 10px; border-top: 1px solid var(--line); color: var(--dim); }
+      /* 동작 고르기 줄. 동작이 있는 모델을 열었을 때만 보인다 */
+      #animBar { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+      #animBar[hidden] { display: none; }
+      #anim {
+        font: inherit;
+        color: var(--text);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 4px 6px;
+        max-width: 260px;
+      }
       /* 체크박스는 글자와 붙여 놓는다 (입력칸처럼 늘어나면 안 된다) */
       label.opt { display: flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; }
       label.opt input { flex: none; min-width: 0; margin: 0; }
@@ -99,6 +111,10 @@
     <main>
       <div id="tree"></div>
       <div id="preview">
+        <div id="animBar" hidden>
+          Animation
+          <select id="anim"></select>
+        </div>
         <canvas id="viewer" hidden></canvas>
         <div id="info">Open a DMO Data folder to start.</div>
       </div>

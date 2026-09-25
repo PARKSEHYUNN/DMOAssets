@@ -10,7 +10,7 @@
  * 하는 일: 팩 폴더 열기, 파일 트리 그리기, 검색, 미리보기 (이미지와 모델), 추출, GLB 내보내기
  */
 
-import { showModel, clearModel } from "./viewer.js";
+import { showModel, clearModel, playClip } from "./viewer.js";
 
 const $ = (id) => document.getElementById(id);
 const treeEl = $("tree");
@@ -21,6 +21,8 @@ const extractBtn = $("extractBtn");
 const exportBtn = $("exportBtn");
 const noEffectsEl = $("noEffects");
 const viewerEl = $("viewer");
+const animEl = $("anim");
+const animBarEl = $("animBar");
 const previewEl = $("preview");
 
 /** 모델로 열 수 있는 확장자. kfm 은 안에 적힌 nif 를 따라간다 (FORMAT 10-1) */
@@ -168,6 +170,9 @@ function resetPreview() {
     previewUrl = null;
     previewEl.querySelector("img")?.remove();
     viewerEl.hidden = true;
+    // 동작 목록은 모델마다 다르다. 비우고 숨긴다
+    animBarEl.hidden = true;
+    animEl.replaceChildren();
     clearModel();
 }
 
@@ -188,9 +193,18 @@ async function showModelPreview(name) {
 
     viewerEl.hidden = false;
     try {
-        const { size, meshes } = await showModel(viewerEl, r.result.bytes);
+        const { size, meshes, clips } = await showModel(viewerEl, r.result.bytes);
         const dim = size.map((v) => Math.round(v)).join(" x ");
-        setStatus(`${r.result.path} — ${meshes} meshes, ${dim}, ${humanSize(r.result.bytes.length)} GLB`);
+        // 동작이 있으면 목록을 채우고 첫 동작을 틀어 준다. 첫 칸은 처음 자세다
+        if (clips.length > 0) {
+            const rest = new Option("Rest pose", "");
+            animEl.replaceChildren(rest, ...clips.map((c) => new Option(c, c)));
+            animEl.value = clips[0];
+            animBarEl.hidden = false;
+            playClip(clips[0]);
+        }
+        const anims = clips.length ? `, ${clips.length} animations` : "";
+        setStatus(`${r.result.path} — ${meshes} meshes, ${dim}, ${humanSize(r.result.bytes.length)} GLB${anims}`);
     } catch (e) {
         viewerEl.hidden = true;
         infoEl.textContent = `${name}\n\nError: ${e.message}`;
@@ -289,6 +303,9 @@ $('openBtn').onclick = async () => {
   exportBtn.disabled = true;
   infoEl.textContent = 'Select a file to preview it.';
 };
+
+// 동작을 고르면 그 동작을 반복 재생한다 (빈 값은 처음 자세)
+animEl.onchange = () => playClip(animEl.value);
 
 // 옵션을 바꾸면 보고 있던 모델을 다시 변환해서 바로 비교할 수 있게 한다
 noEffectsEl.onchange = () => {
